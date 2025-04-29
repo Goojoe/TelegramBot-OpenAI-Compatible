@@ -96,3 +96,12 @@ class ConfigLoader:
             Dictionary of command configurations
         """
         return self.config.get("commands", {})
+
+    def get_authorized_users(self) -> list:
+        """
+        获取授权用户ID列表。
+
+        Returns:
+            授权用户ID列表
+        """
+        return self.config.get("authorized_users", [])

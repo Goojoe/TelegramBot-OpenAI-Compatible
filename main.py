@@ -117,4 +117,4 @@ if __name__ == "__main__":
         print(f"Starting FastAPI server on http://localhost:8000")
         print(f"Webhook URL configured (for setting): {WEBHOOK_URL}")
         print("Note: For local testing, you might need a tool like ngrok to expose localhost.")
-        uvicorn.run(app, host="0.0.0.0", port=8000)
+        uvicorn.run(app, host="0.0.0.0", port=7860)

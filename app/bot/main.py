@@ -1,10 +1,10 @@
 import os
 import logging
 from telegram import Update, BotCommand
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 from app.config.config_loader import ConfigLoader
 from app.api.client import OpenAIClient
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 # Configure logging
 logging.basicConfig(
@@ -18,6 +18,22 @@ api_clients: Dict[str, OpenAIClient] = {}
 
 # Global config loader instance
 config_loader = ConfigLoader()
+
+# 全局变量用于存储用户会话历史
+user_conversations: Dict[int, Dict[str, Any]] = {}
+
+async def is_user_authorized(user_id: int) -> bool:
+    """
+    检查用户是否在授权列表中。
+
+    Args:
+        user_id: Telegram用户ID
+
+    Returns:
+        如果用户已授权则返回True，否则返回False
+    """
+    authorized_users = config_loader.get_authorized_users()
+    return user_id in authorized_users or len(authorized_users) == 0  # 如果列表为空，则允许所有用户
 
 async def get_openai_client(endpoint_name: str) -> OpenAIClient:
     """
@@ -50,7 +66,7 @@ async def get_openai_client(endpoint_name: str) -> OpenAIClient:
     logger.info(f"Initialized OpenAIClient for endpoint: {endpoint_name}")
     return client
 
-async def command_handler_factory(command_config: Dict[str, Any]):
+def command_handler_factory(command_config: Dict[str, Any]):
     """
     Factory function to create command handlers based on configuration.
 
@@ -69,51 +85,156 @@ async def command_handler_factory(command_config: Dict[str, Any]):
         # Return a dummy handler that logs an error
         async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Command configuration error for command triggered by user {update.effective_user.id}")
-            await update.message.reply_text("Sorry, there was a configuration error for this command.")
+            await update.message.reply_text("抱歉，此命令的配置存在错误。")
         return error_handler
 
     async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handles the command dynamically based on config."""
-        user_message = update.message.text
-        # Remove the command itself from the message if needed, or handle arguments
-        # For simplicity, we'll use the full message for now.
-        # You might want to parse arguments like: context.args
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
 
-        logger.info(f"Handling command for user {update.effective_user.id} with config: {command_config}")
+        # 检查用户是否已授权
+        if not await is_user_authorized(user_id):
+            logger.warning(f"Unauthorized user {user_id} attempted to use the bot")
+            await update.message.reply_text("抱歉，您没有权限使用此机器人。")
+            return
+
+        user_message = update.message.text
+        # 移除命令本身，只保留参数部分
+        command_parts = user_message.split(' ', 1)
+        user_content = command_parts[1] if len(command_parts) > 1 else ""
+
+        logger.info(f"Handling command for user {user_id} with config: {command_config}")
 
         try:
             client = await get_openai_client(endpoint_name)
         except ValueError as e:
             logger.error(f"Failed to get OpenAI client: {e}")
-            await update.message.reply_text("Sorry, there was an error configuring the API connection.")
+            await update.message.reply_text("抱歉，API连接配置出错。")
             return
 
-        # Construct messages payload for OpenAI API
-        # This is a basic example; you might want conversation history management
-        messages = [{"role": "user", "content": user_message}]
+        # 初始化或获取用户的对话历史
+        if user_id not in user_conversations:
+            user_conversations[user_id] = {
+                "current_endpoint": endpoint_name,
+                "current_model": model,
+                "current_params": params,
+                "messages": []
+            }
+        else:
+            # 更新当前会话的模型和端点
+            user_conversations[user_id]["current_endpoint"] = endpoint_name
+            user_conversations[user_id]["current_model"] = model
+            user_conversations[user_id]["current_params"] = params
+            # 如果用户使用新命令，则清除历史会话
+            user_conversations[user_id]["messages"] = []
+
+        # 添加用户消息到会话历史
+        if user_content:
+            user_conversations[user_id]["messages"].append({"role": "user", "content": user_content})
+
+        # 使用对话历史构建消息
+        messages = user_conversations[user_id]["messages"]
+
+        # 如果没有消息或消息为空，添加一个默认的用户消息
+        if not messages or (len(messages) == 1 and not messages[0].get("content")):
+            messages = [{"role": "user", "content": "你好，请介绍一下你自己。"}]
+            user_conversations[user_id]["messages"] = messages
 
         try:
-            # Show typing indicator
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+            # 显示输入指示器
+            await context.bot.send_chat_action(chat_id=chat_id, action='typing')
 
             response = await client.create_chat_completion(
                 model=model,
                 messages=messages,
-                **params # Pass configured parameters like temperature, max_tokens
+                **params # 传递配置的参数，如temperature, max_tokens
             )
 
             if response and response.get("choices"):
-                reply_text = response["choices"][0].get("message", {}).get("content", "Sorry, I couldn't get a response.")
+                assistant_message = response["choices"][0].get("message", {})
+                reply_text = assistant_message.get("content", "抱歉，我无法获取回复。")
+
+                # 添加助手回复到会话历史
+                user_conversations[user_id]["messages"].append({"role": "assistant", "content": reply_text})
+
+                # 限制会话历史的长度，防止过长
+                if len(user_conversations[user_id]["messages"]) > 20:  # 保留最近的20条消息
+                    user_conversations[user_id]["messages"] = user_conversations[user_id]["messages"][-20:]
+
                 await update.message.reply_text(reply_text)
             else:
                 logger.error(f"Invalid or empty response from API for endpoint {endpoint_name}: {response}")
-                await update.message.reply_text("Sorry, I received an unexpected response from the AI service.")
+                await update.message.reply_text("抱歉，我从AI服务收到了意外的响应。")
 
         except Exception as e:
             logger.error(f"Error during API call for endpoint {endpoint_name}: {e}", exc_info=True)
-            await update.message.reply_text("Sorry, an error occurred while processing your request.")
+            await update.message.reply_text("抱歉，处理您的请求时出错。")
 
     return handler
+
+async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理非命令的普通文本消息，实现连续对话功能。
+    """
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    # 检查用户是否已授权
+    if not await is_user_authorized(user_id):
+        logger.warning(f"Unauthorized user {user_id} attempted to use the bot")
+        await update.message.reply_text("抱歉，您没有权限使用此机器人。")
+        return
+
+    # 检查用户是否有活跃的会话
+    if user_id not in user_conversations:
+        await update.message.reply_text("请先使用一个命令（如 /chat）来开始对话。")
+        return
+
+    user_message = update.message.text
+    endpoint_name = user_conversations[user_id]["current_endpoint"]
+    model = user_conversations[user_id]["current_model"]
+    params = user_conversations[user_id]["current_params"]
+
+    try:
+        client = await get_openai_client(endpoint_name)
+    except ValueError as e:
+        logger.error(f"Failed to get OpenAI client: {e}")
+        await update.message.reply_text("抱歉，API连接配置出错。")
+        return
+
+    # 添加用户消息到会话历史
+    user_conversations[user_id]["messages"].append({"role": "user", "content": user_message})
+
+    try:
+        # 显示输入指示器
+        await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+
+        response = await client.create_chat_completion(
+            model=model,
+            messages=user_conversations[user_id]["messages"],
+            **params
+        )
+
+        if response and response.get("choices"):
+            assistant_message = response["choices"][0].get("message", {})
+            reply_text = assistant_message.get("content", "抱歉，我无法获取回复。")
+
+            # 添加助手回复到会话历史
+            user_conversations[user_id]["messages"].append({"role": "assistant", "content": reply_text})
+
+            # 限制会话历史的长度，防止过长
+            if len(user_conversations[user_id]["messages"]) > 20:  # 保留最近的20条消息
+                user_conversations[user_id]["messages"] = user_conversations[user_id]["messages"][-20:]
+
+            await update.message.reply_text(reply_text)
+        else:
+            logger.error(f"Invalid or empty response from API for endpoint {endpoint_name}: {response}")
+            await update.message.reply_text("抱歉，我从AI服务收到了意外的响应。")
+
+    except Exception as e:
+        logger.error(f"Error during API call for endpoint {endpoint_name}: {e}", exc_info=True)
+        await update.message.reply_text("抱歉，处理您的请求时出错。")
 
 async def post_init(application: Application):
     """
@@ -154,10 +275,8 @@ def create_bot_application() -> Application:
             application.add_handler(handler)
             logger.info(f"Registered handler for command: {command_name}")
 
-    # Add a default message handler if needed (e.g., for non-command messages)
-    # async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    #     await update.message.reply_text(f"Echo: {update.message.text}")
-    # application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    # 添加文本消息处理器，实现连续对话功能
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
     logger.info("Telegram Bot Application created and handlers registered.")
     return application
