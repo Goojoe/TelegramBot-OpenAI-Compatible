@@ -1,0 +1,61 @@
+# Example Configuration for Telegram Bot
+
+# Define your OpenAI-compatible API endpoints here
+# You can define multiple endpoints and reference them in commands.
+api_endpoints:
+  default_openai:
+    # Get API key from environment variable OPENAI_API_KEY
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "https://api.openai.com/v1" # Standard OpenAI endpoint
+  custom_api_1:
+    # Or hardcode the key (less secure, use environment variables preferably)
+    api_key: "your_custom_api_key_here"
+    # Example for a local or custom deployment
+    base_url: "http://localhost:8080/v1"
+  another_provider:
+    api_key: "${ANOTHER_PROVIDER_KEY}"
+    base_url: "https://api.anotherprovider.com/v1"
+
+# Define custom slash commands and their behavior
+# The key is the command (e.g., /chat)
+commands:
+  /chat:
+    description: "Chat using the default OpenAI model."
+    # Which API endpoint configuration to use from 'api_endpoints'
+    api_endpoint: "default_openai"
+    # Which model to use with this endpoint
+    model: "gpt-3.5-turbo"
+    # Optional parameters to pass to the chat completion API
+    parameters:
+      temperature: 0.7
+      max_tokens: 150
+  /creative:
+    description: "Generate creative text with higher temperature."
+    api_endpoint: "default_openai"
+    model: "gpt-4" # Example using a different model
+    parameters:
+      temperature: 0.95
+      max_tokens: 300
+  /custom:
+    description: "Use a custom API endpoint."
+    api_endpoint: "custom_api_1"
+    model: "local-custom-model"
+    parameters:
+      temperature: 0.5
+  /summary:
+    description: "Summarize text using another provider."
+    api_endpoint: "another_provider"
+    model: "provider-summary-model"
+    parameters:
+      max_tokens: 100
+      # Add any other specific parameters the provider supports
+      # custom_param: "value"
+
+# Add more commands as needed...
+# /translate:
+#   description: "Translate text"
+#   api_endpoint: "default_openai"
+#   model: "gpt-3.5-turbo"
+#   parameters:
+#     # You might add specific instructions via system prompt here if supported
+#     # system_prompt: "Translate the following text to French:"
